@@ -1,25 +1,29 @@
 import os
 from watchdog.observers import Observer
-from file_handler import FileHandler, DOWNLOAD_FOLDER
+from analytics import initialize_log_file
+from fileHandler import FileHandler
 import time
 
 observer = None
+DOWNLOAD_FOLDER = r"F:\Downloads"
 
-def start_monitoring(icon=None, item=None):
+def startMonitoring(download_folder, icon=None, item=None):
     global observer
-    if not os.path.exists(DOWNLOAD_FOLDER):
-        print(f"Error: The directory {DOWNLOAD_FOLDER} does not exist.")
+    if not os.path.exists(download_folder):
+        print(f"Error: The directory {download_folder} does not exist.")
         return
-    event_handler = FileHandler()
+    event_handler = FileHandler(download_folder)
     observer = Observer()
-    observer.schedule(event_handler, DOWNLOAD_FOLDER, recursive=False)
-    print(f"Monitoring {DOWNLOAD_FOLDER} for .tmp files and renames...")
+    observer.schedule(event_handler, download_folder, recursive=False)
+    print(f"Monitoring {download_folder} for .tmp files and renames...")
     observer.start()
+
 
 def main():
     global observer
     observer = None
-    start_monitoring()
+    initialize_log_file(DOWNLOAD_FOLDER)  #have to pass download folder into these function calls
+    startMonitoring(DOWNLOAD_FOLDER) 
     try:
         while True:
             time.sleep(1)

@@ -4,20 +4,25 @@ import shutil as su
 import sqlite3 as s3
 from watchdog.events import FileSystemEventHandler
 from urllib.parse import urlparse
+from analytics import log_event
 
 EdgeDB = r"C:\Users\micah\AppData\Local\Microsoft\Edge\User Data\Default\History"
 TempLoc = r"C:\Users\micah\AppData\Local\Microsoft\Edge\User Data\Default\History_temp"
-DOWNLOAD_FOLDER = r"F:\Downloads"
 
-def get_website_folder(domain):
-        target_folder = os.path.join(DOWNLOAD_FOLDER, domain)
-        os.makedirs(target_folder, exist_ok=True)
-        return target_folder
+def getWebsiteFolder(domain, download_folder):
+    target_folder = os.path.join(download_folder, domain)
+    os.makedirs(target_folder, exist_ok=True)
+    return target_folder
     
 class FileHandler(FileSystemEventHandler):
+    def __init__(self, download_folder):
+        super().__init__()
+        self.download_folder = download_folder
+
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".tmp"):
             print(f"Detected new .tmp file: {event.src_path}")
+            log_event("Created", event.src_path, "N/A", self.download_folder)
 
     def on_moved(self, event):
         if not event.is_directory:
@@ -37,11 +42,12 @@ class FileHandler(FileSystemEventHandler):
                     if not file_path.endswith((".tmp", ".crdownload")):
                         domain = self.get_file_domain(file_path)
                         self.move_to_website_folder(file_path, domain)
+                        log_event("Moved", file_path, domain, self.download_folder)
                     return
         except FileNotFoundError:
-            print(f"File {file_path} was not found.")
+            print(f"File {file_path} not found")
         except Exception as e:
-            print(f"Error processing {file_path}: {e}")
+            print(f"Error with {file_path}: {e}")
             
     def get_file_domain(self, file_path):
         retries = 5
@@ -53,20 +59,20 @@ class FileHandler(FileSystemEventHandler):
                 if domain:
                     return domain
             except s3.OperationalError as e:
-                if "database is locked" in str(e):
-                    print(f"Database is locked, retrying in {delay} seconds...")
+                if "database locked" in str(e):
+                    print(f"Database is locked, retry in {delay} seconds")
                     time.sleep(delay)
                     delay *= 2  # Exponential backoff
                 else:
-                    print(f"Error fetching domain from Edge: {e}")
+                    print(f"Error getting domain from Edge: {e}")
                     return "unknown_domain"
             except Exception as e:
-                print(f"Error fetching domain from Edge: {e}")
+                print(f"Error getting domain from Edge: {e}")
                 return "unknown_domain"
             finally:
                 if os.path.exists(temp_db):
                     os.remove(temp_db)  # Clean up the temporary database file
-        print("Failed to fetch domain after multiple attempts.")
+        print("Failed to get domain from Edge")
         return "unknown_domain"
 
     def copy_edge_db_to_temp(self):
@@ -92,7 +98,7 @@ class FileHandler(FileSystemEventHandler):
                     conn.close()
                     return domain
         conn.close()
-        print(f"No matching entry found for file path: {file_path}")
+        print(f"No entry found for: {file_path}")
         return "unknown_domain"
 
     def extract_domain_from_url(self, url):
@@ -101,10 +107,8 @@ class FileHandler(FileSystemEventHandler):
 
     def move_to_website_folder(self, file_path, domain):
         try:
-            target_folder = get_website_folder(domain)
+            target_folder = getWebsiteFolder(domain, self.download_folder)
             su.move(file_path, os.path.join(target_folder, os.path.basename(file_path)))
             print(f"Moved {file_path} to {target_folder}")
         except Exception as e:
             print(f"Failed to move {file_path}: {e}")
-            
-    
