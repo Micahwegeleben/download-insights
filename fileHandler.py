@@ -9,7 +9,7 @@ from analytics import log_event
 EdgeDB = r"C:\Users\micah\AppData\Local\Microsoft\Edge\User Data\Default\History"
 TempLoc = r"C:\Users\micah\AppData\Local\Microsoft\Edge\User Data\Default\History_temp"
 
-def getWebsiteFolder(domain, download_folder):
+def getWebsiteFolder(domain, download_folder): #i now pass in download folder
     target_folder = os.path.join(download_folder, domain)
     os.makedirs(target_folder, exist_ok=True)
     return target_folder
@@ -22,7 +22,7 @@ class FileHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".tmp"):
             print(f"Detected new .tmp file: {event.src_path}")
-            log_event("Created", event.src_path, "N/A", self.download_folder)
+            log_event("Created", event.src_path, "N/A", self.download_folder) #pass in download
 
     def on_moved(self, event):
         if not event.is_directory:
@@ -42,7 +42,7 @@ class FileHandler(FileSystemEventHandler):
                     if not file_path.endswith((".tmp", ".crdownload")):
                         domain = self.get_file_domain(file_path)
                         self.move_to_website_folder(file_path, domain)
-                        log_event("Moved", file_path, domain, self.download_folder)
+                        log_event("Moved", file_path, domain, self.download_folder) #pass in download
                     return
         except FileNotFoundError:
             print(f"File {file_path} not found")
@@ -51,7 +51,7 @@ class FileHandler(FileSystemEventHandler):
             
     def get_file_domain(self, file_path):
         retries = 5
-        delay = 1  # in sec
+        delay = 1  #seconds
         for attempt in range(retries):
             try:
                 temp_db = self.copy_edge_db_to_temp()
@@ -62,7 +62,7 @@ class FileHandler(FileSystemEventHandler):
                 if "database locked" in str(e):
                     print(f"Database is locked, retry in {delay} seconds")
                     time.sleep(delay)
-                    delay *= 2  # Exponential backoff
+                    delay *= 2
                 else:
                     print(f"Error getting domain from Edge: {e}")
                     return "unknown_domain"
@@ -71,7 +71,7 @@ class FileHandler(FileSystemEventHandler):
                 return "unknown_domain"
             finally:
                 if os.path.exists(temp_db):
-                    os.remove(temp_db)  # Clean up the temporary database file
+                    os.remove(temp_db)  #clean up the temporary database file
         print("Failed to get domain from Edge")
         return "unknown_domain"
 
@@ -107,7 +107,7 @@ class FileHandler(FileSystemEventHandler):
 
     def move_to_website_folder(self, file_path, domain):
         try:
-            target_folder = getWebsiteFolder(domain, self.download_folder)
+            target_folder = getWebsiteFolder(domain, self.download_folder) #requires download folder
             su.move(file_path, os.path.join(target_folder, os.path.basename(file_path)))
             print(f"Moved {file_path} to {target_folder}")
         except Exception as e:

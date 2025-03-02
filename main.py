@@ -22,7 +22,7 @@ def startMonitoring(download_folder, icon=None, item=None):
 def main():
     global observer
     observer = None
-    initialize_log_file(DOWNLOAD_FOLDER)  #have to pass download folder into these function calls
+    initialize_log_file(DOWNLOAD_FOLDER) #have to pass download folder into these function calls
     startMonitoring(DOWNLOAD_FOLDER) 
     try:
         while True:
