@@ -40,22 +40,23 @@ class FileHandler(FileSystemEventHandler):
 
                 if initial_size == current_size:
                     if not file_path.endswith((".tmp", ".crdownload")):
-                        domain = self.get_file_domain(file_path)
-                        log_event("Moved", file_path, domain, self.download_folder) #pass in download
+                        website = self.get_file_domain(file_path)
+                        domain = self.extract_domain_from_url(website)
+                        log_event("Moved", file_path, domain, self.download_folder, website) #pass in download
                         self.move_to_website_folder(file_path, domain)
                     return
         except FileNotFoundError:
             print(f"File {file_path} not found")
         except Exception as e:
             print(f"Error with {file_path}: {e}")
-            
+    
     def get_file_domain(self, file_path):
         retries = 5
         delay = 1  #seconds
         for attempt in range(retries):
             try:
                 temp_db = self.copy_edge_db_to_temp()
-                domain = self.query_domain_from_db(temp_db, file_path)
+                domain = self.query_url_from_db(temp_db, file_path)
                 if domain:
                     return domain
             except s3.OperationalError as e:
@@ -81,7 +82,7 @@ class FileHandler(FileSystemEventHandler):
         su.copy2(edge_downloads_db, temp_db)
         return temp_db
 
-    def query_domain_from_db(self, temp_db, file_path):
+    def query_url_from_db(self, temp_db, file_path):
         conn = s3.connect(temp_db)
         cursor = conn.cursor()
         cursor.execute("PRAGMA busy_timeout = 3000")
@@ -94,9 +95,10 @@ class FileHandler(FileSystemEventHandler):
         if result:
             for url in result:
                 if url:
-                    domain = self.extract_domain_from_url(url)
-                    conn.close()
-                    return domain
+                    return url
+                    # domain = self.extract_domain_from_url(url)
+                    # conn.close()
+                    # return domain
         conn.close()
         print(f"No entry found for: {file_path}")
         return "unknown_domain"
