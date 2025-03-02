@@ -22,7 +22,7 @@ class FileHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".tmp"):
             print(f"Detected new .tmp file: {event.src_path}")
-            log_event("Created", event.src_path, "N/A", self.download_folder) #pass in download
+            #log_event("Created", event.src_path, "N/A", self.download_folder) #pass in download
 
     def on_moved(self, event):
         if not event.is_directory:
@@ -41,8 +41,8 @@ class FileHandler(FileSystemEventHandler):
                 if initial_size == current_size:
                     if not file_path.endswith((".tmp", ".crdownload")):
                         domain = self.get_file_domain(file_path)
-                        self.move_to_website_folder(file_path, domain)
                         log_event("Moved", file_path, domain, self.download_folder) #pass in download
+                        self.move_to_website_folder(file_path, domain)
                     return
         except FileNotFoundError:
             print(f"File {file_path} not found")
