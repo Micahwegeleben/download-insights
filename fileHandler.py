@@ -4,6 +4,7 @@ import tempfile
 import time
 import shutil as su
 import sqlite3 as s3
+from contextlib import closing
 from typing import Iterable
 
 from watchdog.events import FileSystemEventHandler
@@ -33,6 +34,22 @@ def _save_settings(settings: dict) -> None:
     os.makedirs(_CONFIG_DIR, exist_ok=True)
     with open(_CONFIG_FILE, "w", encoding="utf-8") as handle:
         json.dump(settings, handle, indent=2)
+
+
+def _remove_file_safely(path: str, retries: int = 5, delay: float = 0.5) -> None:
+    """Attempt to remove a file, retrying if it is temporarily locked."""
+
+    for attempt in range(retries):
+        try:
+            os.remove(path)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 def get_saved_edge_history_path() -> str | None:
@@ -224,7 +241,12 @@ class FileHandler(FileSystemEventHandler):
                 return "unknown_domain"
             finally:
                 if temp_db and os.path.exists(temp_db):
-                    os.remove(temp_db)  #clean up the temporary database file
+                    try:
+                        _remove_file_safely(temp_db)
+                    except PermissionError as error:
+                        self._emit(
+                            f"Failed to clean up temporary database {temp_db}: {error}"
+                        )
         self._emit("Failed to get domain from Edge")
         return "unknown_domain"
 
@@ -257,25 +279,25 @@ class FileHandler(FileSystemEventHandler):
         return temp_db
 
     def query_url_from_db(self, temp_db, file_path):
-        with s3.connect(temp_db) as conn:
+        with closing(s3.connect(temp_db)) as conn:
             cursor = conn.cursor()
-            cursor.execute("PRAGMA busy_timeout = 3000")
-            cursor.execute(
-                """
-                SELECT site_url, tab_url, tab_referrer_url
-                FROM downloads
-                WHERE target_path = ?
-                """,
-                (file_path,),
-            )
-            result = cursor.fetchone()
-            if result:
-                for url in result:
-                    if url:
-                        return url
-                        # domain = self.extract_domain_from_url(url)
-                        # conn.close()
-                        # return domain
+            try:
+                cursor.execute("PRAGMA busy_timeout = 3000")
+                cursor.execute(
+                    """
+                    SELECT site_url, tab_url, tab_referrer_url
+                    FROM downloads
+                    WHERE target_path = ?
+                    """,
+                    (file_path,),
+                )
+                result = cursor.fetchone()
+                if result:
+                    for url in result:
+                        if url:
+                            return url
+            finally:
+                cursor.close()
         self._emit(f"No entry found for: {file_path}")
         return "unknown_domain"
 
