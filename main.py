@@ -9,7 +9,12 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from watchdog.observers import Observer
 
 from analytics import INSIGHTS_FOLDER, LOG_FILE_NAME, initialize_log_file
-from fileHandler import FileHandler
+from fileHandler import (
+    FileHandler,
+    auto_detect_edge_history_path,
+    get_saved_edge_history_path,
+    set_saved_edge_history_path,
+)
 
 DEFAULT_DOWNLOAD_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")
 REFRESH_INTERVAL_MS = 4000
@@ -38,6 +43,15 @@ class DownloadInsightsApp:
         self.csv_path: str | None = None
         self.csv_mtime: float | None = None
         self.tree_columns: list[str] = []
+
+        self.edge_history_var = tk.StringVar()
+        saved_edge_history = get_saved_edge_history_path()
+        if saved_edge_history:
+            self.edge_history_var.set(saved_edge_history)
+        else:
+            detected_edge_history = auto_detect_edge_history_path()
+            if detected_edge_history:
+                self.edge_history_var.set(detected_edge_history)
 
         self._build_layout()
         self._update_csv_path(self.path_var.get())
@@ -102,6 +116,18 @@ class DownloadInsightsApp:
 
         browse_button = ttk.Button(controls, text="Browse", command=self._browse_for_folder)
         browse_button.grid(row=1, column=1, sticky="ew", pady=(6, 0))
+
+        edge_label = ttk.Label(controls, text="Edge history database", style="TLabel")
+        edge_label.grid(row=2, column=0, sticky="w", pady=(18, 0))
+
+        edge_entry = ttk.Entry(controls, textvariable=self.edge_history_var, style="Modern.TEntry")
+        edge_entry.grid(row=3, column=0, sticky="ew", padx=(0, 12), pady=(6, 0))
+
+        edge_browse = ttk.Button(controls, text="Browse", command=self._browse_for_edge_history)
+        edge_browse.grid(row=3, column=1, sticky="ew", pady=(6, 0))
+
+        edge_auto = ttk.Button(controls, text="Use auto-detected", command=self._use_auto_edge_history)
+        edge_auto.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         controls.columnconfigure(0, weight=1)
 
@@ -178,6 +204,36 @@ class DownloadInsightsApp:
             self._update_csv_path(selected)
             self._queue_message(f"Download folder set to {selected}")
 
+    def _browse_for_edge_history(self) -> None:
+        initial = self.edge_history_var.get()
+        initial_dir = os.path.dirname(initial) if initial else None
+        selected = filedialog.askopenfilename(
+            initialdir=initial_dir,
+            title="Select Edge history database",
+            filetypes=(
+                ("Edge history database", "History"),
+                ("SQLite databases", "*.sqlite *.db"),
+                ("All files", "*.*"),
+            ),
+        )
+        if selected:
+            self.edge_history_var.set(selected)
+            set_saved_edge_history_path(selected)
+            self._queue_message(f"Edge history database set to {selected}")
+
+    def _use_auto_edge_history(self) -> None:
+        detected = auto_detect_edge_history_path()
+        if detected:
+            self.edge_history_var.set(detected)
+            set_saved_edge_history_path(None)
+            self._queue_message(f"Using auto-detected Edge history database at {detected}")
+        else:
+            messagebox.showwarning(
+                "Download Insights",
+                "Unable to locate the Microsoft Edge history database automatically."
+                " Please select the file manually.",
+            )
+
     def _update_csv_path(self, folder: str | None) -> None:
         if folder and os.path.isdir(folder):
             self.csv_path = os.path.join(folder, INSIGHTS_FOLDER, LOG_FILE_NAME)
@@ -199,6 +255,20 @@ class DownloadInsightsApp:
         if not os.path.isdir(folder):
             messagebox.showerror("Download Insights", f"The folder '{folder}' does not exist or is not accessible.")
             return
+
+        edge_history_path = self.edge_history_var.get().strip()
+        if edge_history_path:
+            if os.path.isfile(edge_history_path):
+                set_saved_edge_history_path(edge_history_path)
+            else:
+                messagebox.showwarning(
+                    "Download Insights",
+                    "The specified Edge history database does not exist."
+                    " The application will attempt to detect it automatically.",
+                )
+                set_saved_edge_history_path(None)
+        else:
+            set_saved_edge_history_path(None)
 
         try:
             initialize_log_file(folder)
