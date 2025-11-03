@@ -1,9 +1,12 @@
 import csv
 import os
+import shutil
 import sqlite3
 from datetime import datetime
 
-INSIGHTS_FOLDER = "downloadinsights"
+from paths import get_analytics_dir
+
+LEGACY_INSIGHTS_FOLDER = "downloadinsights"
 DATABASE_FILE_NAME = "downloadInsightsAnalytics.db"
 LEGACY_CSV_FILE_NAME = "downloadInsightsAnalytics.csv"
 
@@ -34,13 +37,41 @@ CREATE TABLE IF NOT EXISTS insights (
 
 
 def _database_path(download_folder: str) -> str:
-    return os.path.join(download_folder, INSIGHTS_FOLDER, DATABASE_FILE_NAME)
+    return os.path.join(get_analytics_dir(download_folder), DATABASE_FILE_NAME)
 
 
 def _ensure_directory(download_folder: str) -> str:
-    insights_folder_path = os.path.join(download_folder, INSIGHTS_FOLDER)
-    os.makedirs(insights_folder_path, exist_ok=True)
+    insights_folder_path = get_analytics_dir(download_folder)
+    _migrate_legacy_storage(download_folder, insights_folder_path)
     return insights_folder_path
+
+
+def _legacy_insights_dir(download_folder: str) -> str:
+    return os.path.join(os.path.abspath(os.path.expanduser(download_folder)), LEGACY_INSIGHTS_FOLDER)
+
+
+def _migrate_legacy_storage(download_folder: str, destination: str) -> None:
+    legacy_dir = _legacy_insights_dir(download_folder)
+    if not os.path.isdir(legacy_dir):
+        return
+
+    os.makedirs(destination, exist_ok=True)
+
+    legacy_db = os.path.join(legacy_dir, DATABASE_FILE_NAME)
+    new_db = os.path.join(destination, DATABASE_FILE_NAME)
+    if os.path.isfile(legacy_db) and not os.path.exists(new_db):
+        try:
+            shutil.copy2(legacy_db, new_db)
+        except OSError:
+            pass
+
+    legacy_csv = os.path.join(legacy_dir, LEGACY_CSV_FILE_NAME)
+    new_csv = os.path.join(destination, LEGACY_CSV_FILE_NAME)
+    if os.path.isfile(legacy_csv) and not os.path.exists(new_csv):
+        try:
+            shutil.copy2(legacy_csv, new_csv)
+        except OSError:
+            pass
 
 
 def initialize_log_file(download_folder: str) -> None:
@@ -160,6 +191,7 @@ def _to_int_or_none(value: object) -> int | None:
 
 
 def fetch_insights(download_folder: str) -> list[dict[str, str]]:
+    _ensure_directory(download_folder)
     database_path = _database_path(download_folder)
     if not os.path.exists(database_path):
         return []
@@ -193,6 +225,7 @@ def fetch_insights(download_folder: str) -> list[dict[str, str]]:
 
 
 def get_latest_entry_id(download_folder: str) -> int:
+    _ensure_directory(download_folder)
     database_path = _database_path(download_folder)
     if not os.path.exists(database_path):
         return 0
