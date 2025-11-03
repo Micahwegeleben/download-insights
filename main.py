@@ -12,7 +12,6 @@ from watchdog.observers import Observer
 
 from analytics import (
     EXPECTED_HEADER,
-    INSIGHTS_FOLDER,
     export_insights_to_csv,
     fetch_insights,
     get_database_path,

@@ -11,9 +11,10 @@ from watchdog.events import FileSystemEventHandler
 from urllib.parse import urlparse
 
 from analytics import log_event
+from paths import get_config_file_path, get_domain_root
 
-_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".download_insights")
-_CONFIG_FILE = os.path.join(_CONFIG_DIR, "config.json")
+_CONFIG_FILE = get_config_file_path()
+_CONFIG_DIR = os.path.dirname(_CONFIG_FILE)
 _EDGE_HISTORY_KEY = "edge_history_path"
 
 
@@ -168,8 +169,9 @@ def get_edge_history_path() -> str:
 
     raise FileNotFoundError("Unable to locate the Microsoft Edge history database.")
 
-def getWebsiteFolder(domain, download_folder): #i now pass in download folder
-    target_folder = os.path.join(download_folder, domain)
+def getWebsiteFolder(domain, download_folder):  # i now pass in download folder
+    domain_root = get_domain_root(download_folder)
+    target_folder = os.path.join(domain_root, domain)
     os.makedirs(target_folder, exist_ok=True)
     return target_folder
     
