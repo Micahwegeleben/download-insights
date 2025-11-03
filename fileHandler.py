@@ -257,23 +257,25 @@ class FileHandler(FileSystemEventHandler):
         return temp_db
 
     def query_url_from_db(self, temp_db, file_path):
-        conn = s3.connect(temp_db)
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA busy_timeout = 3000")
-        cursor.execute("""
-            SELECT site_url, tab_url, tab_referrer_url 
-            FROM downloads 
-            WHERE target_path = ?
-        """, (file_path,))
-        result = cursor.fetchone()
-        if result:
-            for url in result:
-                if url:
-                    return url
-                    # domain = self.extract_domain_from_url(url)
-                    # conn.close()
-                    # return domain
-        conn.close()
+        with s3.connect(temp_db) as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA busy_timeout = 3000")
+            cursor.execute(
+                """
+                SELECT site_url, tab_url, tab_referrer_url
+                FROM downloads
+                WHERE target_path = ?
+                """,
+                (file_path,),
+            )
+            result = cursor.fetchone()
+            if result:
+                for url in result:
+                    if url:
+                        return url
+                        # domain = self.extract_domain_from_url(url)
+                        # conn.close()
+                        # return domain
         self._emit(f"No entry found for: {file_path}")
         return "unknown_domain"
 
