@@ -16,6 +16,9 @@ from paths import get_config_file_path, get_domain_root
 _CONFIG_FILE = get_config_file_path()
 _CONFIG_DIR = os.path.dirname(_CONFIG_FILE)
 _EDGE_HISTORY_KEY = "edge_history_path"
+_DOWNLOAD_FOLDER_KEY = "download_folder"
+_AUTO_START_KEY = "auto_start_monitoring"
+_REFRESH_INTERVAL_KEY = "refresh_interval_seconds"
 
 
 def _load_settings() -> dict:
@@ -70,6 +73,62 @@ def set_saved_edge_history_path(path: str | None) -> None:
         settings[_EDGE_HISTORY_KEY] = os.path.abspath(os.path.expanduser(path))
     else:
         settings.pop(_EDGE_HISTORY_KEY, None)
+    _save_settings(settings)
+
+
+def get_saved_download_folder() -> str | None:
+    settings = _load_settings()
+    path = settings.get(_DOWNLOAD_FOLDER_KEY)
+    if isinstance(path, str) and path.strip():
+        expanded = os.path.abspath(os.path.expanduser(path))
+        return expanded
+    return None
+
+
+def set_saved_download_folder(path: str | None) -> None:
+    settings = _load_settings()
+    if path:
+        settings[_DOWNLOAD_FOLDER_KEY] = os.path.abspath(os.path.expanduser(path))
+    else:
+        settings.pop(_DOWNLOAD_FOLDER_KEY, None)
+    _save_settings(settings)
+
+
+def get_auto_start_monitoring() -> bool:
+    settings = _load_settings()
+    value = settings.get(_AUTO_START_KEY)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return False
+
+
+def set_auto_start_monitoring(enabled: bool) -> None:
+    settings = _load_settings()
+    settings[_AUTO_START_KEY] = bool(enabled)
+    _save_settings(settings)
+
+
+def get_refresh_interval_seconds(default: int = 4) -> int:
+    settings = _load_settings()
+    value = settings.get(_REFRESH_INTERVAL_KEY, default)
+    try:
+        interval = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, interval)
+
+
+def set_refresh_interval_seconds(seconds: int) -> None:
+    settings = _load_settings()
+    settings[_REFRESH_INTERVAL_KEY] = max(1, int(seconds))
     _save_settings(settings)
 
 

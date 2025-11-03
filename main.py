@@ -21,12 +21,18 @@ from analytics import (
 from fileHandler import (
     FileHandler,
     auto_detect_edge_history_path,
+    get_auto_start_monitoring,
+    get_refresh_interval_seconds,
+    get_saved_download_folder,
     get_saved_edge_history_path,
+    set_auto_start_monitoring,
+    set_refresh_interval_seconds,
+    set_saved_download_folder,
     set_saved_edge_history_path,
 )
 
 DEFAULT_DOWNLOAD_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")
-REFRESH_INTERVAL_MS = 4000
+DEFAULT_REFRESH_INTERVAL_SECONDS = 4
 LOG_POLL_INTERVAL_MS = 250
 
 
@@ -41,7 +47,10 @@ class DownloadInsightsApp:
         self._setup_styles()
 
         self.path_var = tk.StringVar()
-        if os.path.isdir(DEFAULT_DOWNLOAD_FOLDER):
+        saved_download_folder = get_saved_download_folder()
+        if saved_download_folder:
+            self.path_var.set(saved_download_folder)
+        elif os.path.isdir(DEFAULT_DOWNLOAD_FOLDER):
             self.path_var.set(DEFAULT_DOWNLOAD_FOLDER)
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
@@ -53,6 +62,13 @@ class DownloadInsightsApp:
         self.tree_columns: list[str] = []
         self.canvas: tk.Canvas | None = None
         self.canvas_window: int | None = None
+
+        self.auto_start_var = tk.BooleanVar(value=get_auto_start_monitoring())
+        self.refresh_interval_ms = max(
+            1000, get_refresh_interval_seconds(DEFAULT_REFRESH_INTERVAL_SECONDS) * 1000
+        )
+        self.refresh_job: str | None = None
+        self.settings_window: tk.Toplevel | None = None
 
         self.insights_data: list[dict[str, str]] = []
         self.domain_colors: dict[str, str] = {}
@@ -81,20 +97,36 @@ class DownloadInsightsApp:
         self.range_error_var = tk.StringVar(value="")
 
         self.edge_history_var = tk.StringVar()
+        self.edge_history_auto = tk.BooleanVar(value=False)
         saved_edge_history = get_saved_edge_history_path()
         if saved_edge_history:
             self.edge_history_var.set(saved_edge_history)
+            self.edge_history_auto.set(False)
         else:
             detected_edge_history = auto_detect_edge_history_path()
             if detected_edge_history:
                 self.edge_history_var.set(detected_edge_history)
+            self.edge_history_auto.set(True)
+
+        self.path_summary_var = tk.StringVar()
+        self.edge_summary_var = tk.StringVar()
+        self.auto_start_summary_var = tk.StringVar()
+
+        self.path_var.trace_add("write", lambda *_: self._refresh_settings_summary())
+        self.edge_history_var.trace_add("write", lambda *_: self._refresh_settings_summary())
+        self.auto_start_var.trace_add("write", lambda *_: self._refresh_settings_summary())
+        self.edge_history_auto.trace_add("write", lambda *_: self._refresh_settings_summary())
+
+        self._refresh_settings_summary()
 
         self._build_layout()
         self._update_data_source(self.path_var.get())
 
         self.root.after(LOG_POLL_INTERVAL_MS, self._process_log_queue)
-        self.root.after(REFRESH_INTERVAL_MS, self._check_data_updates)
+        self._schedule_refresh()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self.root.after(300, self._auto_start_if_enabled)
 
     # ------------------------------------------------------------------
     # UI construction & styling
@@ -169,23 +201,42 @@ class DownloadInsightsApp:
         path_label = ttk.Label(controls, text="Download folder", style="TLabel")
         path_label.grid(row=0, column=0, sticky="w")
 
-        path_entry = ttk.Entry(controls, textvariable=self.path_var, style="Modern.TEntry")
-        path_entry.grid(row=1, column=0, sticky="ew", padx=(0, 12), pady=(6, 0))
-
-        browse_button = ttk.Button(controls, text="Browse", command=self._browse_for_folder)
-        browse_button.grid(row=1, column=1, sticky="ew", pady=(6, 0))
+        path_value = ttk.Label(
+            controls,
+            textvariable=self.path_summary_var,
+            style="Status.TLabel",
+            wraplength=600,
+        )
+        path_value.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         edge_label = ttk.Label(controls, text="Edge history database", style="TLabel")
         edge_label.grid(row=2, column=0, sticky="w", pady=(18, 0))
 
-        edge_entry = ttk.Entry(controls, textvariable=self.edge_history_var, style="Modern.TEntry")
-        edge_entry.grid(row=3, column=0, sticky="ew", padx=(0, 12), pady=(6, 0))
+        edge_value = ttk.Label(
+            controls,
+            textvariable=self.edge_summary_var,
+            style="Status.TLabel",
+            wraplength=600,
+        )
+        edge_value.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        edge_browse = ttk.Button(controls, text="Browse", command=self._browse_for_edge_history)
-        edge_browse.grid(row=3, column=1, sticky="ew", pady=(6, 0))
+        auto_start_label = ttk.Label(controls, text="Auto-start monitoring", style="TLabel")
+        auto_start_label.grid(row=4, column=0, sticky="w", pady=(18, 0))
 
-        edge_auto = ttk.Button(controls, text="Use auto-detected", command=self._use_auto_edge_history)
-        edge_auto.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        auto_start_value = ttk.Label(
+            controls,
+            textvariable=self.auto_start_summary_var,
+            style="Status.TLabel",
+        )
+        auto_start_value.grid(row=5, column=0, sticky="w", pady=(6, 0))
+
+        settings_button = ttk.Button(
+            controls,
+            text="Open settings",
+            style="Accent.TButton",
+            command=self._open_settings_window,
+        )
+        settings_button.grid(row=6, column=0, sticky="w", pady=(18, 0))
 
         controls.columnconfigure(0, weight=1)
 
@@ -230,6 +281,62 @@ class DownloadInsightsApp:
         self.log_text.pack(fill="both", expand=True)
         self.log_text.configure(background="#151624", foreground="#e2e8f0", insertbackground="#f8fafc", borderwidth=0, highlightthickness=0)
         self.log_text.configure(state="disabled")
+
+    def _refresh_settings_summary(self) -> None:
+        folder = (self.path_var.get() or "").strip()
+        if folder:
+            self.path_summary_var.set(folder)
+        else:
+            self.path_summary_var.set("Not configured")
+
+        edge_path = (self.edge_history_var.get() or "").strip()
+        if self.edge_history_auto.get():
+            if edge_path:
+                summary = f"Auto-detected ({edge_path})"
+            else:
+                summary = "Automatic detection"
+        else:
+            summary = edge_path or "Not configured"
+        self.edge_summary_var.set(summary)
+
+        self.auto_start_summary_var.set("Enabled" if self.auto_start_var.get() else "Disabled")
+
+    def _open_settings_window(self) -> None:
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            self.settings_window.focus_set()
+            return
+
+        dialog = SettingsDialog(self)
+        self.settings_window = dialog
+        dialog.bind("<Destroy>", self._on_settings_window_destroyed, add="+")
+        dialog.focus_set()
+
+    def _on_settings_window_destroyed(self, event: tk.Event) -> None:
+        if self.settings_window is not None and event.widget is self.settings_window:
+            self.settings_window = None
+
+    def _set_refresh_interval(self, seconds: int) -> None:
+        seconds = max(1, int(seconds))
+        interval_ms = seconds * 1000
+        if interval_ms == self.refresh_interval_ms:
+            return
+        self.refresh_interval_ms = interval_ms
+        self._schedule_refresh()
+
+    def _schedule_refresh(self) -> None:
+        if self.refresh_job is not None:
+            try:
+                self.root.after_cancel(self.refresh_job)
+            except tk.TclError:
+                pass
+        self.refresh_job = self.root.after(self.refresh_interval_ms, self._check_data_updates)
+
+    def _auto_start_if_enabled(self) -> None:
+        if not self.auto_start_var.get() or self.monitoring:
+            return
+        folder = (self.path_var.get() or "").strip()
+        if folder and os.path.isdir(folder):
+            self.start_monitoring()
 
     def _build_insights_tab(self, parent: ttk.Frame) -> None:
         header_row = ttk.Frame(parent, style="Card.TFrame")
@@ -400,43 +507,6 @@ class DownloadInsightsApp:
     # ------------------------------------------------------------------
     # Monitoring controls
     # ------------------------------------------------------------------
-    def _browse_for_folder(self) -> None:
-        selected = filedialog.askdirectory(initialdir=self.path_var.get() or None, title="Select download folder")
-        if selected:
-            self.path_var.set(selected)
-            self._update_data_source(selected)
-            self._queue_message(f"Download folder set to {selected}")
-
-    def _browse_for_edge_history(self) -> None:
-        initial = self.edge_history_var.get()
-        initial_dir = os.path.dirname(initial) if initial else None
-        selected = filedialog.askopenfilename(
-            initialdir=initial_dir,
-            title="Select Edge history database",
-            filetypes=(
-                ("Edge history database", "History"),
-                ("SQLite databases", "*.sqlite *.db"),
-                ("All files", "*.*"),
-            ),
-        )
-        if selected:
-            self.edge_history_var.set(selected)
-            set_saved_edge_history_path(selected)
-            self._queue_message(f"Edge history database set to {selected}")
-
-    def _use_auto_edge_history(self) -> None:
-        detected = auto_detect_edge_history_path()
-        if detected:
-            self.edge_history_var.set(detected)
-            set_saved_edge_history_path(None)
-            self._queue_message(f"Using auto-detected Edge history database at {detected}")
-        else:
-            messagebox.showwarning(
-                "Download Insights",
-                "Unable to locate the Microsoft Edge history database automatically."
-                " Please select the file manually.",
-            )
-
     def _update_data_source(self, folder: str | None) -> None:
         folder = (folder or "").strip()
         if folder and os.path.isdir(folder):
@@ -446,6 +516,67 @@ class DownloadInsightsApp:
                 self._queue_message(f"Unable to prepare insights storage: {exc}")
         self.last_entry_id = 0
         self.load_insights_data()
+
+    def apply_settings(
+        self,
+        download_folder: str,
+        edge_history_path: str | None,
+        use_auto_edge_history: bool,
+        auto_start_monitoring: bool,
+        refresh_interval_seconds: int,
+    ) -> None:
+        normalized_folder = os.path.abspath(os.path.expanduser(download_folder))
+        previous_folder = (self.path_var.get() or "").strip()
+        previous_edge_path = (self.edge_history_var.get() or "").strip()
+        previous_auto_edge = self.edge_history_auto.get()
+        self.path_var.set(normalized_folder)
+        set_saved_download_folder(normalized_folder)
+        if previous_folder != normalized_folder:
+            self._queue_message(f"Download folder set to {normalized_folder}")
+        self._update_data_source(normalized_folder)
+
+        if use_auto_edge_history:
+            set_saved_edge_history_path(None)
+            self.edge_history_auto.set(True)
+            detected = auto_detect_edge_history_path()
+            if detected:
+                self.edge_history_var.set(detected)
+                if previous_auto_edge is False or previous_edge_path != detected:
+                    self._queue_message(
+                        f"Using auto-detected Edge history database at {detected}"
+                    )
+            else:
+                self.edge_history_var.set("")
+                messagebox.showwarning(
+                    "Download Insights",
+                    "Unable to locate the Microsoft Edge history database automatically.",
+                )
+        else:
+            if edge_history_path:
+                normalized_edge = os.path.abspath(os.path.expanduser(edge_history_path))
+                self.edge_history_var.set(normalized_edge)
+                self.edge_history_auto.set(False)
+                set_saved_edge_history_path(normalized_edge)
+                if previous_auto_edge or previous_edge_path != normalized_edge:
+                    self._queue_message(f"Edge history database set to {normalized_edge}")
+            else:
+                self.edge_history_var.set("")
+                self.edge_history_auto.set(False)
+                set_saved_edge_history_path(None)
+
+        previous_auto = self.auto_start_var.get()
+        self.auto_start_var.set(auto_start_monitoring)
+        set_auto_start_monitoring(auto_start_monitoring)
+        if auto_start_monitoring and not previous_auto:
+            self._queue_message("Auto-start monitoring enabled")
+        elif not auto_start_monitoring and previous_auto:
+            self._queue_message("Auto-start monitoring disabled")
+
+        set_refresh_interval_seconds(refresh_interval_seconds)
+        self._set_refresh_interval(refresh_interval_seconds)
+
+        if auto_start_monitoring:
+            self._auto_start_if_enabled()
 
     def start_monitoring(self) -> None:
         if self.monitoring:
@@ -461,9 +592,20 @@ class DownloadInsightsApp:
             messagebox.showerror("Download Insights", f"The folder '{folder}' does not exist or is not accessible.")
             return
 
-        edge_history_path = self.edge_history_var.get().strip()
-        if edge_history_path:
-            if os.path.isfile(edge_history_path):
+        edge_history_path = (self.edge_history_var.get() or "").strip()
+        if self.edge_history_auto.get():
+            set_saved_edge_history_path(None)
+            if not edge_history_path:
+                detected = auto_detect_edge_history_path()
+                if detected:
+                    self.edge_history_var.set(detected)
+                else:
+                    messagebox.showwarning(
+                        "Download Insights",
+                        "Unable to locate the Microsoft Edge history database automatically.",
+                    )
+        else:
+            if edge_history_path and os.path.isfile(edge_history_path):
                 set_saved_edge_history_path(edge_history_path)
             else:
                 messagebox.showwarning(
@@ -472,8 +614,10 @@ class DownloadInsightsApp:
                     " The application will attempt to detect it automatically.",
                 )
                 set_saved_edge_history_path(None)
-        else:
-            set_saved_edge_history_path(None)
+                self.edge_history_auto.set(True)
+                detected = auto_detect_edge_history_path()
+                if detected:
+                    self.edge_history_var.set(detected)
 
         try:
             initialize_log_file(folder)
@@ -916,6 +1060,7 @@ class DownloadInsightsApp:
         self.empty_state.place_forget()
 
     def _check_data_updates(self) -> None:
+        self.refresh_job = None
         should_reload = False
         folder = (self.path_var.get() or "").strip()
 
@@ -941,7 +1086,7 @@ class DownloadInsightsApp:
         if should_reload:
             self.load_insights_data()
 
-        self.root.after(REFRESH_INTERVAL_MS, self._check_data_updates)
+        self._schedule_refresh()
 
     # ------------------------------------------------------------------
     # Logging utilities
@@ -971,8 +1116,273 @@ class DownloadInsightsApp:
             self.canvas.unbind_all("<MouseWheel>")
             self.canvas.unbind_all("<Button-4>")
             self.canvas.unbind_all("<Button-5>")
+        if self.refresh_job is not None:
+            try:
+                self.root.after_cancel(self.refresh_job)
+            except tk.TclError:
+                pass
         self.root.destroy()
 
+
+class SettingsDialog(tk.Toplevel):
+    def __init__(self, app: "DownloadInsightsApp") -> None:
+        super().__init__(app.root)
+        self.app = app
+
+        self.title("Settings")
+        self.configure(background="#11121b")
+        self.transient(app.root)
+        self.resizable(False, False)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        self.download_var = tk.StringVar(value=app.path_var.get())
+        self.edge_history_var = tk.StringVar(value=app.edge_history_var.get())
+        self.auto_edge_var = tk.BooleanVar(value=app.edge_history_auto.get())
+        self.auto_start_var = tk.BooleanVar(value=app.auto_start_var.get())
+        self.refresh_interval_var = tk.IntVar(value=max(1, app.refresh_interval_ms // 1000))
+
+        container = ttk.Frame(self, padding=24, style="TFrame")
+        container.grid(row=0, column=0, sticky="nsew")
+        self.columnconfigure(0, weight=1)
+
+        downloads_label = ttk.Label(container, text="Download folder", style="Heading.TLabel")
+        downloads_label.grid(row=0, column=0, columnspan=2, sticky="w")
+
+        downloads_sub = ttk.Label(
+            container,
+            text="Select the folder that should be monitored for download activity.",
+            style="Subheading.TLabel",
+        )
+        downloads_sub.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 12))
+
+        download_entry = ttk.Entry(container, textvariable=self.download_var, style="Modern.TEntry")
+        download_entry.grid(row=2, column=0, sticky="ew")
+
+        browse_download = ttk.Button(
+            container,
+            text="Browse",
+            command=self._browse_for_download_folder,
+        )
+        browse_download.grid(row=2, column=1, padx=(12, 0), sticky="ew")
+
+        edge_label = ttk.Label(container, text="Edge history database", style="Heading.TLabel")
+        edge_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(24, 0))
+
+        edge_sub = ttk.Label(
+            container,
+            text="Choose the Microsoft Edge history database or rely on automatic detection.",
+            style="Subheading.TLabel",
+        )
+        edge_sub.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 12))
+
+        self.edge_entry = ttk.Entry(container, textvariable=self.edge_history_var, style="Modern.TEntry")
+        self.edge_entry.grid(row=5, column=0, sticky="ew")
+
+        self.edge_browse = ttk.Button(
+            container,
+            text="Browse",
+            command=self._browse_for_edge_history,
+        )
+        self.edge_browse.grid(row=5, column=1, padx=(12, 0), sticky="ew")
+
+        auto_detect_button = ttk.Button(
+            container,
+            text="Use auto-detected",
+            command=self._use_auto_detected_edge_history,
+        )
+        auto_detect_button.grid(row=6, column=0, sticky="w", pady=(8, 0))
+
+        auto_detect_toggle = ttk.Checkbutton(
+            container,
+            text="Automatically detect the Edge history database when available",
+            variable=self.auto_edge_var,
+            command=self._on_auto_edge_toggle,
+        )
+        auto_detect_toggle.grid(row=7, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        general_label = ttk.Label(container, text="General", style="Heading.TLabel")
+        general_label.grid(row=8, column=0, columnspan=2, sticky="w", pady=(24, 0))
+
+        general_sub = ttk.Label(
+            container,
+            text="Adjust application behavior and refresh cadence.",
+            style="Subheading.TLabel",
+        )
+        general_sub.grid(row=9, column=0, columnspan=2, sticky="w", pady=(4, 12))
+
+        auto_start_toggle = ttk.Checkbutton(
+            container,
+            text="Start monitoring automatically when the app opens",
+            variable=self.auto_start_var,
+        )
+        auto_start_toggle.grid(row=10, column=0, columnspan=2, sticky="w")
+
+        refresh_label = ttk.Label(container, text="Refresh interval (seconds)", style="TLabel")
+        refresh_label.grid(row=11, column=0, sticky="w", pady=(18, 0))
+
+        self.refresh_spin = ttk.Spinbox(
+            container,
+            from_=1,
+            to=3600,
+            increment=1,
+            textvariable=self.refresh_interval_var,
+            width=6,
+        )
+        self.refresh_spin.grid(row=12, column=0, sticky="w", pady=(6, 0))
+
+        buttons = ttk.Frame(container, style="TFrame")
+        buttons.grid(row=13, column=0, columnspan=2, sticky="e", pady=(24, 0))
+
+        cancel_button = ttk.Button(buttons, text="Cancel", command=self._on_cancel)
+        cancel_button.pack(side="right")
+
+        save_button = ttk.Button(buttons, text="Save", style="Accent.TButton", command=self._on_save)
+        save_button.pack(side="right", padx=(0, 12))
+
+        container.columnconfigure(0, weight=1)
+
+        self._on_auto_edge_toggle()
+
+        self.bind("<Return>", lambda event: self._on_save())
+        self.bind("<Escape>", lambda event: self._on_cancel())
+
+    def _browse_for_download_folder(self) -> None:
+        selected = filedialog.askdirectory(
+            parent=self,
+            initialdir=self.download_var.get() or None,
+            title="Select download folder",
+        )
+        if selected:
+            self.download_var.set(selected)
+
+    def _browse_for_edge_history(self) -> None:
+        initial = self.edge_history_var.get()
+        initial_dir = os.path.dirname(initial) if initial else None
+        selected = filedialog.askopenfilename(
+            parent=self,
+            initialdir=initial_dir,
+            title="Select Edge history database",
+            filetypes=(
+                ("Edge history database", "History"),
+                ("SQLite databases", "*.sqlite *.db"),
+                ("All files", "*.*"),
+            ),
+        )
+        if selected:
+            self.auto_edge_var.set(False)
+            self.edge_history_var.set(selected)
+            self._on_auto_edge_toggle()
+
+    def _use_auto_detected_edge_history(self) -> None:
+        detected = auto_detect_edge_history_path()
+        if detected:
+            self.edge_history_var.set(detected)
+            self.auto_edge_var.set(True)
+            self._on_auto_edge_toggle()
+        else:
+            messagebox.showwarning(
+                "Download Insights",
+                "Unable to locate the Microsoft Edge history database automatically.",
+                parent=self,
+            )
+
+    def _on_auto_edge_toggle(self) -> None:
+        auto = self.auto_edge_var.get()
+        state = "disabled" if auto else "normal"
+        self.edge_entry.configure(state=state)
+        self.edge_browse.configure(state=state)
+        if auto and not (self.edge_history_var.get() or "").strip():
+            detected = auto_detect_edge_history_path()
+            if detected:
+                self.edge_history_var.set(detected)
+
+    def _on_save(self) -> None:
+        download_folder = (self.download_var.get() or "").strip()
+        if not download_folder:
+            messagebox.showerror(
+                "Download Insights",
+                "Select a download folder before saving.",
+                parent=self,
+            )
+            return
+        if not os.path.isdir(download_folder):
+            messagebox.showerror(
+                "Download Insights",
+                "The selected download folder does not exist.",
+                parent=self,
+            )
+            return
+
+        use_auto_edge = self.auto_edge_var.get()
+        edge_path = (self.edge_history_var.get() or "").strip()
+
+        if use_auto_edge:
+            if not edge_path:
+                detected = auto_detect_edge_history_path()
+                if not detected:
+                    messagebox.showerror(
+                        "Download Insights",
+                        "Unable to detect the Edge history database automatically.",
+                        parent=self,
+                    )
+                    return
+                self.edge_history_var.set(detected)
+                edge_path = detected
+        else:
+            if not edge_path:
+                messagebox.showerror(
+                    "Download Insights",
+                    "Select the Edge history database or enable automatic detection.",
+                    parent=self,
+                )
+                return
+            if not os.path.isfile(edge_path):
+                messagebox.showerror(
+                    "Download Insights",
+                    "The selected Edge history database could not be found.",
+                    parent=self,
+                )
+                return
+
+        try:
+            refresh_seconds = int(self.refresh_interval_var.get())
+        except (TypeError, ValueError):
+            messagebox.showerror(
+                "Download Insights",
+                "Enter a valid refresh interval in seconds.",
+                parent=self,
+            )
+            return
+
+        if refresh_seconds < 1:
+            messagebox.showerror(
+                "Download Insights",
+                "The refresh interval must be at least 1 second.",
+                parent=self,
+            )
+            return
+
+        self.app.apply_settings(
+            download_folder=download_folder,
+            edge_history_path=edge_path if not use_auto_edge else None,
+            use_auto_edge_history=use_auto_edge,
+            auto_start_monitoring=self.auto_start_var.get(),
+            refresh_interval_seconds=refresh_seconds,
+        )
+
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
 
 def main() -> None:
     root = tk.Tk()
