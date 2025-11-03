@@ -208,8 +208,16 @@ class FileHandler(FileSystemEventHandler):
                     if not file_path.endswith((".tmp", ".crdownload")):
                         website = self.get_file_domain(file_path)
                         domain = self.extract_domain_from_url(website)
-                        log_event("Moved", file_path, domain, self.download_folder, website) #pass in download
-                        self.move_to_website_folder(file_path, domain)
+                        final_path, is_duplicate = self.move_to_website_folder(file_path, domain)
+                        event_name = "Moved (duplicate)" if is_duplicate else "Moved"
+                        log_event(
+                            event_name,
+                            final_path,
+                            domain,
+                            self.download_folder,
+                            website,
+                            is_duplicate=is_duplicate,
+                        )
                     return
         except FileNotFoundError:
             self._emit(f"File {file_path} not found")
@@ -310,7 +318,27 @@ class FileHandler(FileSystemEventHandler):
     def move_to_website_folder(self, file_path, domain):
         try:
             target_folder = getWebsiteFolder(domain, self.download_folder) #requires download folder
-            su.move(file_path, os.path.join(target_folder, os.path.basename(file_path)))
-            self._emit(f"Moved {file_path} to {target_folder}")
+            original_name = os.path.basename(file_path)
+            destination_path = os.path.join(target_folder, original_name)
+
+            if os.path.abspath(file_path) == os.path.abspath(destination_path):
+                return destination_path, False
+
+            name, extension = os.path.splitext(original_name)
+            counter = 1
+            duplicate = False
+
+            while os.path.exists(destination_path):
+                duplicate = True
+                candidate_name = f"{name}({counter}){extension}"
+                destination_path = os.path.join(target_folder, candidate_name)
+                counter += 1
+
+            su.move(file_path, destination_path)
+            self._emit(f"Moved {file_path} to {destination_path}")
+            if duplicate:
+                self._emit("Duplicate detected. Adjusted filename to avoid overwrite.")
+            return destination_path, duplicate
         except Exception as e:
             self._emit(f"Failed to move {file_path}: {e}")
+            raise
