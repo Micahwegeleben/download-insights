@@ -1,16 +1,24 @@
-import csv
 import os
 import queue
 import threading
 import time
 import tkinter as tk
+import sqlite3
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from watchdog.observers import Observer
 
-from analytics import INSIGHTS_FOLDER, LOG_FILE_NAME, initialize_log_file
+from analytics import (
+    EXPECTED_HEADER,
+    INSIGHTS_FOLDER,
+    export_insights_to_csv,
+    fetch_insights,
+    get_database_path,
+    get_latest_entry_id,
+    initialize_log_file,
+)
 from fileHandler import (
     FileHandler,
     auto_detect_edge_history_path,
@@ -42,8 +50,7 @@ class DownloadInsightsApp:
         self.observer: Observer | None = None
         self.stop_event = threading.Event()
         self.monitoring = False
-        self.csv_path: str | None = None
-        self.csv_mtime: float | None = None
+        self.last_entry_id: int = 0
         self.tree_columns: list[str] = []
         self.canvas: tk.Canvas | None = None
         self.canvas_window: int | None = None
@@ -84,10 +91,10 @@ class DownloadInsightsApp:
                 self.edge_history_var.set(detected_edge_history)
 
         self._build_layout()
-        self._update_csv_path(self.path_var.get())
+        self._update_data_source(self.path_var.get())
 
         self.root.after(LOG_POLL_INTERVAL_MS, self._process_log_queue)
-        self.root.after(REFRESH_INTERVAL_MS, self._check_csv_updates)
+        self.root.after(REFRESH_INTERVAL_MS, self._check_data_updates)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------
@@ -226,8 +233,19 @@ class DownloadInsightsApp:
         self.log_text.configure(state="disabled")
 
     def _build_insights_tab(self, parent: ttk.Frame) -> None:
-        insights_header = ttk.Label(parent, text="Download insights", style="Heading.TLabel")
-        insights_header.pack(anchor="w")
+        header_row = ttk.Frame(parent, style="Card.TFrame")
+        header_row.pack(fill="x")
+
+        insights_header = ttk.Label(header_row, text="Download insights", style="Heading.TLabel")
+        insights_header.pack(side="left")
+
+        export_button = ttk.Button(
+            header_row,
+            text="Download CSV",
+            command=self._export_insights_to_csv,
+            style="TButton",
+        )
+        export_button.pack(side="right")
 
         insights_subheader = ttk.Label(
             parent,
@@ -387,7 +405,7 @@ class DownloadInsightsApp:
         selected = filedialog.askdirectory(initialdir=self.path_var.get() or None, title="Select download folder")
         if selected:
             self.path_var.set(selected)
-            self._update_csv_path(selected)
+            self._update_data_source(selected)
             self._queue_message(f"Download folder set to {selected}")
 
     def _browse_for_edge_history(self) -> None:
@@ -420,13 +438,15 @@ class DownloadInsightsApp:
                 " Please select the file manually.",
             )
 
-    def _update_csv_path(self, folder: str | None) -> None:
+    def _update_data_source(self, folder: str | None) -> None:
+        folder = (folder or "").strip()
         if folder and os.path.isdir(folder):
-            self.csv_path = os.path.join(folder, INSIGHTS_FOLDER, LOG_FILE_NAME)
-        else:
-            self.csv_path = None
-        self.csv_mtime = None
-        self.load_csv_data()
+            try:
+                get_database_path(folder)
+            except OSError as exc:
+                self._queue_message(f"Unable to prepare insights storage: {exc}")
+        self.last_entry_id = 0
+        self.load_insights_data()
 
     def start_monitoring(self) -> None:
         if self.monitoring:
@@ -459,10 +479,10 @@ class DownloadInsightsApp:
         try:
             initialize_log_file(folder)
         except OSError as exc:
-            messagebox.showerror("Download Insights", f"Unable to prepare the insights log file.\n{exc}")
+            messagebox.showerror("Download Insights", f"Unable to prepare the insights database.\n{exc}")
             return
 
-        self._update_csv_path(folder)
+        self._update_data_source(folder)
         self.stop_event = threading.Event()
         self.monitoring = True
         self.status_label.configure(text=f"Monitoring {folder}")
@@ -510,59 +530,78 @@ class DownloadInsightsApp:
         self.status_label.configure(text="Idle")
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
-        self.load_csv_data()
+        self.load_insights_data()
 
     # ------------------------------------------------------------------
-    # CSV handling & insights table
+    # Insights data handling
     # ------------------------------------------------------------------
-    def load_csv_data(self) -> None:
+    def load_insights_data(self) -> None:
         self._hide_empty_state()
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        if not self.csv_path or not os.path.exists(self.csv_path):
-            self.csv_mtime = None
+        folder = (self.path_var.get() or "").strip()
+        if not folder or not os.path.isdir(folder):
             self.insights_data = []
-            self._update_analytics_from_csv()
-            self._show_empty_state("No insights yet. Start monitoring to populate this view.")
+            self._update_analytics_summary()
+            self.last_entry_id = 0
+            self._show_empty_state("Select a download folder to view insights.")
             return
 
         try:
-            with open(self.csv_path, newline="", encoding="utf-8") as csv_file:
-                reader = csv.reader(csv_file)
-                rows = list(reader)
-        except OSError as exc:
-            self._queue_message(f"Unable to read insights file: {exc}")
-            self.csv_mtime = None
+            records = fetch_insights(folder)
+            self.last_entry_id = get_latest_entry_id(folder)
+        except (OSError, sqlite3.DatabaseError) as exc:
+            self._queue_message(f"Unable to read insights data: {exc}")
             self.insights_data = []
-            self._update_analytics_from_csv()
-            self._show_empty_state("Unable to read insights file.")
+            self._update_analytics_summary()
+            self.last_entry_id = 0
+            self._show_empty_state("Unable to read insights data.")
             return
 
-        if not rows:
-            self.csv_mtime = None
-            self.insights_data = []
-            self._update_analytics_from_csv()
-            self._show_empty_state("The insights file is empty.")
-            return
+        self._setup_tree_columns(EXPECTED_HEADER)
 
-        header, *data_rows = rows
-        self._setup_tree_columns(header)
+        self.insights_data = records
+        self._update_analytics_summary()
 
-        self.insights_data = self._parse_csv_rows(header, data_rows)
-        self._update_analytics_from_csv()
-
-        for index, row in enumerate(data_rows):
+        for index, record in enumerate(records):
+            values = [record.get(column, "") for column in EXPECTED_HEADER]
             tag = "even" if index % 2 == 0 else "odd"
-            self.tree.insert("", "end", values=row, tags=(tag,))
+            self.tree.insert("", "end", values=values, tags=(tag,))
 
-        if not data_rows:
+        if not records:
             self._show_empty_state("No insights recorded yet.")
 
+    def _export_insights_to_csv(self) -> None:
+        folder = (self.path_var.get() or "").strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror(
+                "Download Insights",
+                "Select a valid download folder before exporting your insights.",
+            )
+            return
+
+        destination = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=(("CSV files", "*.csv"), ("All files", "*.*")),
+            title="Save insights as CSV",
+        )
+        if not destination:
+            return
+
         try:
-            self.csv_mtime = os.path.getmtime(self.csv_path)
-        except OSError:
-            self.csv_mtime = None
+            export_insights_to_csv(folder, destination)
+        except (OSError, sqlite3.DatabaseError) as exc:
+            messagebox.showerror(
+                "Download Insights",
+                f"Unable to export insights data.\n{exc}",
+            )
+            return
+
+        messagebox.showinfo(
+            "Download Insights",
+            f"Insights exported to:\n{destination}",
+        )
 
     def _setup_tree_columns(self, header: list[str]) -> None:
         if header != self.tree_columns:
@@ -582,16 +621,7 @@ class DownloadInsightsApp:
     # ------------------------------------------------------------------
     # Analytics helpers
     # ------------------------------------------------------------------
-    def _parse_csv_rows(self, header: list[str], data_rows: list[list[str]]) -> list[dict[str, str]]:
-        parsed: list[dict[str, str]] = []
-        for row in data_rows:
-            record: dict[str, str] = {}
-            for index, column in enumerate(header):
-                record[column] = row[index] if index < len(row) else ""
-            parsed.append(record)
-        return parsed
-
-    def _update_analytics_from_csv(self) -> None:
+    def _update_analytics_summary(self) -> None:
         domain_totals: dict[str, dict[str, int]] = defaultdict(lambda: {"count": 0, "size": 0, "duplicates": 0})
         total_files = 0
         total_size = 0
@@ -886,16 +916,33 @@ class DownloadInsightsApp:
     def _hide_empty_state(self) -> None:
         self.empty_state.place_forget()
 
-    def _check_csv_updates(self) -> None:
-        if self.csv_path and os.path.exists(self.csv_path):
+    def _check_data_updates(self) -> None:
+        should_reload = False
+        folder = (self.path_var.get() or "").strip()
+
+        if folder and os.path.isdir(folder):
             try:
-                current_mtime = os.path.getmtime(self.csv_path)
-            except OSError:
-                current_mtime = None
-            if current_mtime and current_mtime != self.csv_mtime:
-                self.csv_mtime = current_mtime
-                self.load_csv_data()
-        self.root.after(REFRESH_INTERVAL_MS, self._check_csv_updates)
+                latest_id = get_latest_entry_id(folder)
+            except (OSError, sqlite3.DatabaseError) as exc:
+                if self.last_entry_id != 0:
+                    self._queue_message(f"Unable to access insights data: {exc}")
+                latest_id = None
+
+            if latest_id is None:
+                if self.last_entry_id != 0:
+                    self.last_entry_id = 0
+                    should_reload = True
+            elif latest_id != self.last_entry_id:
+                should_reload = True
+        else:
+            if self.last_entry_id != 0 or self.insights_data:
+                should_reload = True
+            self.last_entry_id = 0
+
+        if should_reload:
+            self.load_insights_data()
+
+        self.root.after(REFRESH_INTERVAL_MS, self._check_data_updates)
 
     # ------------------------------------------------------------------
     # Logging utilities
