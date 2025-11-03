@@ -43,6 +43,8 @@ class DownloadInsightsApp:
         self.csv_path: str | None = None
         self.csv_mtime: float | None = None
         self.tree_columns: list[str] = []
+        self.canvas: tk.Canvas | None = None
+        self.canvas_window: int | None = None
 
         self.edge_history_var = tk.StringVar()
         saved_edge_history = get_saved_edge_history_path()
@@ -99,8 +101,30 @@ class DownloadInsightsApp:
         self.style.configure("TScrollbar", background=card, troughcolor=background, gripcount=0, bordercolor=background, darkcolor=background, lightcolor=background)
 
     def _build_layout(self) -> None:
-        content = ttk.Frame(self.root, padding=24, style="TFrame")
-        content.pack(fill="both", expand=True)
+        container = ttk.Frame(self.root, style="TFrame")
+        container.pack(fill="both", expand=True)
+
+        self.canvas = tk.Canvas(
+            container,
+            background="#11121b",
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+
+        content = ttk.Frame(self.canvas, padding=24, style="TFrame")
+        self.canvas_window = self.canvas.create_window((0, 0), window=content, anchor="nw")
+
+        content.bind("<Configure>", self._on_content_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
 
         control_card = ttk.Frame(content, style="Card.TFrame", padding=24)
         control_card.pack(fill="x")
@@ -193,6 +217,24 @@ class DownloadInsightsApp:
         self.log_text.pack(fill="both", expand=True)
         self.log_text.configure(background="#151624", foreground="#e2e8f0", insertbackground="#f8fafc", borderwidth=0, highlightthickness=0)
         self.log_text.configure(state="disabled")
+
+    def _on_content_configure(self, event: tk.Event) -> None:
+        if self.canvas is not None:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        if self.canvas is not None and self.canvas_window is not None:
+            self.canvas.itemconfigure(self.canvas_window, width=event.width)
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        if self.canvas is None:
+            return
+        if event.delta:
+            self.canvas.yview_scroll(int(-event.delta / 120), "units")
+        elif event.num == 4:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(1, "units")
 
     # ------------------------------------------------------------------
     # Monitoring controls
@@ -426,6 +468,10 @@ class DownloadInsightsApp:
             if not messagebox.askyesno("Download Insights", "Monitoring is running. Do you want to stop and exit?"):
                 return
             self.stop_monitoring()
+        if self.canvas is not None:
+            self.canvas.unbind_all("<MouseWheel>")
+            self.canvas.unbind_all("<Button-4>")
+            self.canvas.unbind_all("<Button-5>")
         self.root.destroy()
 
 
